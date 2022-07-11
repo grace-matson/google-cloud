@@ -179,6 +179,22 @@
           }
         },
         {
+          "widget-type": "toggle",
+          "label": "User Managed Schema",
+          "name": "userManagedSchema",
+          "widget-attributes": {
+            "default": "false",
+            "on": {
+              "value": "true",
+              "label": "True"
+            },
+            "off": {
+              "value": "false",
+              "label": "False"
+            }
+          }
+        },
+        {
           "widget-type": "radio-group",
           "name": "operation",
           "label": "Operation",
@@ -352,6 +368,10 @@
         {
           "type": "property",
           "name": "contentType"
+        },
+        {
+          "type": "property",
+          "name": "userManagedSchema"
         }
       ]
     },

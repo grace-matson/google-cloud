@@ -17,6 +17,7 @@
 package io.cdap.plugin.gcp.dataplex.sink.config;
 
 import com.google.api.gax.rpc.ApiException;
+import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.bigquery.JobInfo;
 import com.google.cloud.bigquery.RangePartitioning;
 import com.google.cloud.bigquery.StandardTableDefinition;
@@ -24,8 +25,17 @@ import com.google.cloud.bigquery.Table;
 import com.google.cloud.bigquery.TimePartitioning;
 import com.google.cloud.dataplex.v1.Asset;
 import com.google.cloud.dataplex.v1.AssetName;
+import com.google.cloud.dataplex.v1.CreateEntityRequest;
 import com.google.cloud.dataplex.v1.DataplexServiceClient;
+import com.google.cloud.dataplex.v1.Entity;
+import com.google.cloud.dataplex.v1.Entity.Type;
+import com.google.cloud.dataplex.v1.EntityName;
+import com.google.cloud.dataplex.v1.GetEntityRequest;
 import com.google.cloud.dataplex.v1.LakeName;
+import com.google.cloud.dataplex.v1.MetadataServiceClient;
+import com.google.cloud.dataplex.v1.StorageFormat;
+import com.google.cloud.dataplex.v1.StorageSystem;
+import com.google.cloud.dataplex.v1.UpdateEntityRequest;
 import com.google.cloud.dataplex.v1.Zone;
 import com.google.cloud.dataplex.v1.ZoneName;
 import com.google.common.base.Strings;
@@ -49,6 +59,7 @@ import io.cdap.plugin.gcp.bigquery.sink.PartitionType;
 import io.cdap.plugin.gcp.bigquery.util.BigQueryUtil;
 import io.cdap.plugin.gcp.common.GCPConnectorConfig;
 import io.cdap.plugin.gcp.dataplex.common.config.DataplexBaseConfig;
+import io.cdap.plugin.gcp.dataplex.common.util.DataplexUtil;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -87,6 +98,7 @@ public class DataplexBatchSinkConfig extends DataplexBaseConfig {
   private static final String NAME_PARTITION_FILTER = "partitionFilter";
   private static final String NAME_PARTITIONING_TYPE = "partitioningType";
   private static final String NAME_TRUNCATE_TABLE = "truncateTable";
+  private static final String NAME_USER_MANAGED_SCHEMA = "userManagedSchema";
   private static final String NAME_UPDATE_SCHEMA = "allowSchemaRelaxation";
   private static final String NAME_PARTITION_BY_FIELD = "partitionField";
   private static final String NAME_REQUIRE_PARTITION_FIELD = "requirePartitionField";
@@ -205,6 +217,12 @@ public class DataplexBatchSinkConfig extends DataplexBaseConfig {
     "operation.")
   protected Boolean truncateTable;
 
+  @Name(NAME_USER_MANAGED_SCHEMA)
+  @Nullable
+  @Macro
+  @Description("Whether the dataplex table schema is managed by the user.")
+  protected Boolean userManagedSchema;
+
   @Name(NAME_UPDATE_SCHEMA)
   @Nullable
   @Macro
@@ -257,6 +275,11 @@ public class DataplexBatchSinkConfig extends DataplexBaseConfig {
   @Nullable
   public FileFormat getFormat() {
     return FileFormat.from(format, FileFormat::canWrite);
+  }
+
+  @Nullable
+  public String getFormatStr() {
+    return format;
   }
 
   @Nullable
@@ -321,6 +344,11 @@ public class DataplexBatchSinkConfig extends DataplexBaseConfig {
   public JobInfo.WriteDisposition getWriteDisposition() {
     return isTruncateTable() ? JobInfo.WriteDisposition.WRITE_TRUNCATE
       : JobInfo.WriteDisposition.WRITE_APPEND;
+  }
+
+  @Nullable
+  public Boolean isUserManagedSchema() {
+    return userManagedSchema != null && userManagedSchema;
   }
 
   @Nullable
@@ -944,7 +972,6 @@ public class DataplexBatchSinkConfig extends DataplexBaseConfig {
     }
   }
 
-
   /*  This method gets the value of content type. Valid content types for each format are:
    *
    *  avro -> application/avro, application/octet-stream
@@ -966,10 +993,10 @@ public class DataplexBatchSinkConfig extends DataplexBaseConfig {
                                   @Nullable String operation, @Nullable String partitionFilter,
                                   @Nullable String partitioningType, @Nullable Long rangeStart,
                                   @Nullable Long rangeEnd, @Nullable Long rangeInterval,
-                                  @Nullable Boolean truncateTable, @Nullable Boolean allowSchemaRelaxation,
-                                  @Nullable String partitionByField, @Nullable Boolean requirePartitionField,
-                                  @Nullable String clusteringOrder, @Nullable String suffix,
-                                  @Nullable String schema) {
+                                  @Nullable Boolean truncateTable, @Nullable Boolean userManagedSchema, 
+                                  @Nullable Boolean allowSchemaRelaxation, @Nullable String partitionByField,
+                                  @Nullable Boolean requirePartitionField, @Nullable String clusteringOrder, 
+                                  @Nullable String suffix, @Nullable String schema) {
     this.referenceName = referenceName;
     this.connection = connection;
     this.location = location;
@@ -988,6 +1015,7 @@ public class DataplexBatchSinkConfig extends DataplexBaseConfig {
     this.rangeEnd = rangeEnd;
     this.rangeInterval = rangeInterval;
     this.truncateTable = truncateTable;
+    this.userManagedSchema = userManagedSchema;
     this.allowSchemaRelaxation = allowSchemaRelaxation;
     this.partitionByField = partitionByField;
     this.requirePartitionField = requirePartitionField;
@@ -1018,6 +1046,7 @@ public class DataplexBatchSinkConfig extends DataplexBaseConfig {
     private Long rangeEnd;
     private Long rangeInterval;
     private Boolean truncateTable;
+    private Boolean userManagedSchema;
     private Boolean allowSchemaRelaxation;
     private String partitionByField;
     private Boolean requirePartitionField;
@@ -1095,6 +1124,11 @@ public class DataplexBatchSinkConfig extends DataplexBaseConfig {
       return this;
     }
 
+    public Builder setUserManagedSchema(Boolean userManagedSchema) {
+      this.userManagedSchema = userManagedSchema;
+      return this;
+    }
+
     public Builder setAllowSchemaRelaxation(Boolean allowSchemaRelaxation) {
       this.allowSchemaRelaxation = allowSchemaRelaxation;
       return this;
@@ -1153,7 +1187,8 @@ public class DataplexBatchSinkConfig extends DataplexBaseConfig {
     public DataplexBatchSinkConfig build() {
       return new DataplexBatchSinkConfig(referenceName, asset, assetType, location, lake, zone, format, connection,
         table, tableKey, dedupeBy, operation, partitionFilter,
-        partitioningType, rangeStart, rangeEnd, rangeInterval, truncateTable, allowSchemaRelaxation, partitionByField,
+        partitioningType, rangeStart, rangeEnd, rangeInterval, truncateTable,
+        userManagedSchema, allowSchemaRelaxation, partitionByField,
         requirePartitionField, clusteringOrder, suffix, schema);
     }
 

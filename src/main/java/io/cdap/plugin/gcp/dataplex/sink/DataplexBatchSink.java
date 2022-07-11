@@ -16,6 +16,7 @@
 
 package io.cdap.plugin.gcp.dataplex.sink;
 
+import com.google.api.gax.rpc.ApiException;
 import com.google.auth.Credentials;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.bigquery.BigQuery;
@@ -28,7 +29,15 @@ import com.google.cloud.bigquery.JobStatistics;
 import com.google.cloud.bigquery.Table;
 import com.google.cloud.dataplex.v1.Asset;
 import com.google.cloud.dataplex.v1.AssetName;
+import com.google.cloud.dataplex.v1.CreateEntityRequest;
 import com.google.cloud.dataplex.v1.DataplexServiceClient;
+import com.google.cloud.dataplex.v1.Entity;
+import com.google.cloud.dataplex.v1.EntityName;
+import com.google.cloud.dataplex.v1.GetEntityRequest;
+import com.google.cloud.dataplex.v1.MetadataServiceClient;
+import com.google.cloud.dataplex.v1.StorageFormat;
+import com.google.cloud.dataplex.v1.StorageSystem;
+import com.google.cloud.dataplex.v1.UpdateEntityRequest;
 import com.google.cloud.hadoop.io.bigquery.BigQueryConfiguration;
 import com.google.cloud.hadoop.io.bigquery.output.BigQueryTableFieldSchema;
 import com.google.cloud.kms.v1.CryptoKeyName;
@@ -199,6 +208,38 @@ public final class DataplexBatchSink extends BatchSink<StructuredRecord, Object,
   public void onRunFinish(boolean succeeded, BatchSinkContext context) {
     if (this.config.getAssetType().equalsIgnoreCase(DataplexConstants.STORAGE_BUCKET_ASSET_TYPE)) {
       emitMetricsForStorageBucket(succeeded, context);
+      // Create entity when pipeline run has succeeded to enable manual discovery in dataplex.
+      // CreateEntity API only allows CRUD operations for GCS assets
+      if (succeeded) {
+        FailureCollector collector = context.getFailureCollector();
+        GoogleCredentials googleCredentials = config.validateAndGetServiceAccountCredentials(collector);
+        Schema schema = config.getSchema(collector);
+        if (schema == null) {
+          schema = context.getInputSchema();
+        }
+        String bucketName = "";
+        try {
+          bucketName = asset.getResourceSpec().getName();
+        } catch (StorageException e) {
+          throw new RuntimeException(
+            "Unable to read bucket name. See error details for more information ", e);
+        }
+        try (
+          DataplexServiceClient dataplexServiceClient =
+            DataplexUtil.getDataplexServiceClient(googleCredentials)
+        ) {
+
+          String assetFullPath = "gs://" + bucketName +
+            "/" + config.getTable();
+          configureMetadataUpdateWithUserManagedSchema(collector, dataplexServiceClient,
+                                                              googleCredentials, assetFullPath,
+                                                              StorageSystem.CLOUD_STORAGE, schema);
+        } catch (ApiException | IOException e) {
+          throw new RuntimeException(
+            String.format("Unable create entity for bucket %s. ", bucketName)
+              + "See error details for more information.", e);
+        }
+      }
       return;
     }
 
@@ -533,9 +574,11 @@ public final class DataplexBatchSink extends BatchSink<StructuredRecord, Object,
     String suffix = config.getSuffix();
     String defaultTimestampFormat = "yyyy-MM-dd-HH-mm";
     String tableName = config.getTable();
-    String timeSuffix = suffix == null || suffix.isEmpty() ?
-      "ts=" + new SimpleDateFormat(defaultTimestampFormat).format(logicalStartTime) :
-      "ts=" + new SimpleDateFormat(suffix).format(logicalStartTime);
+    suffix = Strings.isNullOrEmpty(suffix) ? defaultTimestampFormat : suffix;
+    String timeSuffix = String.format("%s=%s",
+      DataplexConstants.STORAGE_BUCKET_PARTITION_KEY,
+      new SimpleDateFormat(suffix).format(logicalStartTime)
+    );
     String configPath = GCSPath.SCHEME + asset.getResourceSpec().getName();
     String finalPath = String.format("%s/%s/%s/", configPath, tableName, timeSuffix);
     this.outputPath = finalPath;
@@ -553,6 +596,87 @@ public final class DataplexBatchSink extends BatchSink<StructuredRecord, Object,
         new MetricsEmitter(context.getMetrics())::emitMetrics);
     } catch (Exception e) {
       LOG.warn("Metrics for the number of affected rows in GCS Sink maybe incorrect.", e);
+    }
+  }
+
+  /**
+   * Configures metadata update in Dataplex if the schema is user managed
+   *
+   * @param collector
+   * @param dataplexServiceClient
+   * @throws IOException
+   */
+  private void configureMetadataUpdateWithUserManagedSchema(
+    FailureCollector collector, DataplexServiceClient dataplexServiceClient, GoogleCredentials credentials,
+    String assetFullPath, StorageSystem storageSystem, Schema schema
+  ) throws IOException {
+    if (!config.isUserManagedSchema()) {
+      return;
+    }
+    String projectID = config.tryGetProject();
+    String entityID = config.getTable().replaceAll("[^a-zA-Z0-9_]", "_");
+    MetadataServiceClient metadataServiceClient =
+      DataplexUtil.getMetadataServiceClient(credentials);
+    Entity entityBean = null;
+    try {
+      entityBean =
+        metadataServiceClient.getEntity(GetEntityRequest.newBuilder().setName(EntityName.of(
+            projectID, config.getLocation(), config.getLake(), config.getZone(), entityID).toString())
+                                          .setView(GetEntityRequest.EntityView.FULL)
+                                          .build());
+    } catch (ApiException e) {
+      // ignore
+    }
+    com.google.cloud.dataplex.v1.Schema dataplexSchema = DataplexUtil.getDataplexSchema(schema);
+    Entity.Builder entityBuilder = Entity.newBuilder()
+      .setId(entityID)
+      .setAsset(config.getAsset())
+      .setDataPath(assetFullPath)
+      .setType(Entity.Type.TABLE)
+      .setSystem(storageSystem)
+      .setSchema(dataplexSchema)
+      .setFormat(StorageFormat
+        .newBuilder()
+        .setMimeType(DataplexUtil.getStorageFormatForEntity(config.getFormatStr()))
+        .build()
+      );
+
+    if (entityBean != null) {
+      if (entityBean.getSchema().getUserManaged() == false) {
+        throw new RuntimeException("Entity already exists, but the schema is not user-managed.");
+      } else {
+        try {
+          metadataServiceClient.updateEntity(
+            UpdateEntityRequest.newBuilder()
+              .setEntity(entityBuilder
+                           .setName(entityBean.getName())
+                           .setEtag(entityBean.getEtag())
+                           .build()
+              )
+              .build()
+          );
+        } catch (ApiException e) {
+          throw new RuntimeException(
+            String.format("%s: %s", "There was a problem updating the entity for metadata updates.", e.getMessage()));
+        }
+      }
+      return;
+    } else {
+      try {
+        String entityParent = "projects/" + projectID +
+          "/locations/" + config.getLocation() +
+          "/lakes/" + config.getLake() +
+          "/zones/" + config.getZone();
+        metadataServiceClient.createEntity(
+          CreateEntityRequest.newBuilder()
+            .setParent(entityParent)
+            .setEntity(entityBuilder.build())
+            .build()
+        );
+      } catch (ApiException e) {
+        throw new RuntimeException(
+          String.format("%s: %s", "There was a problem creating the entity for metadata updates.", e.getMessage()));
+      }
     }
   }
 

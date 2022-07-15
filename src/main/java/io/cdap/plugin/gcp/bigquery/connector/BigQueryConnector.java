@@ -235,8 +235,23 @@ public final class BigQueryConnector implements DirectConnector {
   private List<StructuredRecord> getTableData(BigQuery bigQuery, String datasetProject, String dataset, String table,
     int limit)
     throws IOException {
-    String query =
-      String.format("SELECT * FROM `%s.%s.%s` LIMIT %d", datasetProject, dataset, table, limit);
+    String tableName = String.format("`%s.%s.%s`", datasetProject, dataset, table);
+    String query;
+    switch (config.samplingType) {
+      case "Random":
+        query = String.format("SELECT *, rand() AS r \n" +
+                                "FROM ( \n" +
+                                "DECLARE num_rows INT64 SELECT COUNT(*) FROM %s;\n" +
+                                "DECLARE percent INT64 MIN(100, 100*CEIL(IEEE_DIVIDE(1000, num_rows)));\n" +
+                                "SELECT * FROM %s TABLESAMPLE SYSTEM (percent PERCENT)\n" +
+                                "\n" +
+                                ") \n" +
+                                "ORDER BY r \n" +
+                                "LIMIT %d\n", tableName, tableName, limit);
+      default:
+        query =
+          String.format("SELECT * FROM %s LIMIT %d", tableName, limit);
+    }
     QueryJobConfiguration queryConfig = QueryJobConfiguration.newBuilder(query).build();
     String id = UUID.randomUUID().toString();
     JobId jobId = JobId.of(id);

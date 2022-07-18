@@ -96,7 +96,7 @@ public final class BigQueryConnector implements DirectConnector {
     }
     String dataset = path.getDataset();
     return getTableData(getBigQuery(config.getProject()), config.getDatasetProject(), dataset, table,
-      sampleRequest.getLimit());
+      sampleRequest.getLimit(), sampleRequest.getProperties().get("sampleType"));
   }
 
   @Override
@@ -233,12 +233,15 @@ public final class BigQueryConnector implements DirectConnector {
   }
 
   private List<StructuredRecord> getTableData(BigQuery bigQuery, String datasetProject, String dataset, String table,
-    int limit)
+    int limit, String sampleType)
     throws IOException {
+    if (sampleType == null) {
+      sampleType = "first";
+    }
     String tableName = String.format("`%s.%s.%s`", datasetProject, dataset, table);
     String query;
-    switch (config.samplingType) {
-      case "Random":
+    switch (sampleType) {
+      case "random":
         query = String.format("SELECT *, rand() AS r \n" +
                                 "FROM ( \n" +
                                 "DECLARE num_rows INT64 SELECT COUNT(*) FROM %s;\n" +

@@ -251,6 +251,7 @@ public final class BigQueryConnector implements DirectConnector {
                                 ") \n" +
                                 "ORDER BY r \n" +
                                 "LIMIT %d\n", tableName, tableName, limit);
+        break;
       default:
         query =
           String.format("SELECT * FROM %s LIMIT %d", tableName, limit);

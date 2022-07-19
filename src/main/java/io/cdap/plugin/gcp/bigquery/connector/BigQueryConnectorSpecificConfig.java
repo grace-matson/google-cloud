@@ -33,10 +33,6 @@ public class BigQueryConnectorSpecificConfig extends BigQueryConnectorConfig {
   @Description("Whether to show hidden datasets")
   protected Boolean showHiddenDatasets;
 
-  @Nullable
-  @Description("The sampling type to use")
-  protected String samplingType;
-
   public BigQueryConnectorSpecificConfig(@Nullable String project, @Nullable String datasetProject,
                                          @Nullable String serviceAccountType, @Nullable String serviceFilePath,
                                          @Nullable String serviceAccountJson,
@@ -44,18 +40,6 @@ public class BigQueryConnectorSpecificConfig extends BigQueryConnectorConfig {
     super(project, datasetProject, serviceAccountType, serviceFilePath, serviceAccountJson);
     this.rootDataset = rootDataset;
     this.showHiddenDatasets = false;
-    this.samplingType = "First";
-  }
-
-  public BigQueryConnectorSpecificConfig(@Nullable String project, @Nullable String datasetProject,
-                                         @Nullable String serviceAccountType, @Nullable String serviceFilePath,
-                                         @Nullable String serviceAccountJson,
-                                         @Nullable String rootDataset,
-                                         @Nullable String samplingType) {
-    super(project, datasetProject, serviceAccountType, serviceFilePath, serviceAccountJson);
-    this.rootDataset = rootDataset;
-    this.showHiddenDatasets = false;
-    this.samplingType = samplingType;
   }
 
   public boolean showHiddenDatasets() {

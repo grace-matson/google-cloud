@@ -96,7 +96,8 @@ public final class BigQueryConnector implements DirectConnector {
     }
     String dataset = path.getDataset();
     return getTableData(getBigQuery(config.getProject()), config.getDatasetProject(), dataset, table,
-      sampleRequest.getLimit(), sampleRequest.getProperties().get("sampleType"));
+      sampleRequest.getLimit(), sampleRequest.getProperties().get("sampleType"),
+                        sampleRequest.getProperties().get("strata"));
   }
 
   @Override
@@ -233,7 +234,7 @@ public final class BigQueryConnector implements DirectConnector {
   }
 
   private List<StructuredRecord> getTableData(BigQuery bigQuery, String datasetProject, String dataset, String table,
-    int limit, String sampleType)
+    int limit, String sampleType, String strata)
     throws IOException {
     if (sampleType == null) {
       sampleType = "first";
@@ -242,15 +243,32 @@ public final class BigQueryConnector implements DirectConnector {
     String query;
     switch (sampleType) {
       case "random":
-        query = String.format("SELECT *, rand() AS r \n" +
-                                "FROM ( \n" +
-                                "DECLARE num_rows INT64 SELECT COUNT(*) FROM %s;\n" +
-                                "DECLARE percent INT64 MIN(100, 100*CEIL(IEEE_DIVIDE(1000, num_rows)));\n" +
-                                "SELECT * FROM %s TABLESAMPLE SYSTEM (percent PERCENT)\n" +
-                                "\n" +
-                                ") \n" +
-                                "ORDER BY r \n" +
-                                "LIMIT %d\n", tableName, tableName, limit);
+        query = String.format("SELECT * EXCEPT (r)\n" +
+                                "FROM (\n" +
+                                "  SELECT *, RAND() AS r\n" +
+                                "  FROM %s\n" +
+                                "  WHERE RAND() < 2*%d/(SELECT COUNT(*) FROM %s)\n" +
+                                ")\n" +
+                                "ORDER BY r\n" +
+                                "LIMIT %d", tableName, limit, tableName, limit);
+        break;
+      case "stratified":
+        query = String.format("WITH table AS (\n" +
+                                "  SELECT *\n" +
+                                "  FROM %s a\n" +
+                                "), table_stats AS (\n" +
+                                "  SELECT *, SUM(c) OVER() total \n" +
+                                "  FROM (\n" +
+                                "    SELECT %s, COUNT(*) c \n" +
+                                "    FROM table\n" +
+                                "    GROUP BY 1)\n" +
+                                ")\n" +
+                                "SELECT *\n" +
+                                "EXCEPT (c, total)\n" +
+                                "FROM table a\n" +
+                                "JOIN table_stats b\n" +
+                                "USING(%s)\n" +
+                                "WHERE RAND()< %d/total\n", tableName, strata, strata, limit);
         break;
       default:
         query =
